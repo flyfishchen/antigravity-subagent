@@ -45,7 +45,8 @@ $S models
 
 - **工作目录**：不带 `--project` 时，shell 工具的工作目录会被钉在 `default-cli-project` 登记的文件夹，所以脚本默认加 `--project outside-of-project`。
 - **缓存**：
-  - Claude 模型经 agy 调用时，缓存命中率 95% 以上，跨进程也能命中。
+  - Claude 模型经 agy 调用时，同一会话内缓存命中率 95% 以上；新开会话只命中 agy 系统提示的固定部分（约 5.4k），子代理之间不共享缓存。
+  - agy 会把单条用户消息截在约 19 万字节，不报错；封装脚本超过 18 万字节就直接拒绝。
   - Gemini 3.8 Flash 在约 8k 的小上下文下命中为 0。
   - Gemini 4 Argon 稳定命中约 5.3k 的固定前缀。
 - **沙箱**：Ubuntu 默认的 AppArmor 策略会让 agy 的终端沙箱不可用。此时 `--sandbox` 静默无效，`--mode auto` 退回默认模式，所以权限只能靠 hook 控制。

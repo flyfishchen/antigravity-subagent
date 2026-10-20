@@ -60,6 +60,10 @@ PROFILES = {
     "review":  ("opus", "high", "第二意见/代码审查/方案把关"),
 }
 
+# agy silently truncates a single user message at ~192 KB, replacing the tail (often the actual
+# question) with "<truncated N bytes>"; refuse anything close to that instead
+MAX_MESSAGE_BYTES = 180_000
+
 GATE = Path(__file__).resolve().with_name("agy_gate.py")
 # ~/.gemini/antigravity-cli/hooks.json is loaded but its hooks never run in print mode (agy 1.4.2)
 HOOK_FILE = Path.home() / ".gemini/config/hooks.json"
@@ -188,10 +192,17 @@ def run(a, prompts):
     # prompts always go through stdin: a single argv string is capped at 128 KiB on Linux,
     # which large-input Gemini tasks easily exceed
     cmd = build_cmd(a, stream_input=True)
+    messages = [wrap(a, p) if i == 0 else p for i, p in enumerate(prompts)]
+    for i, m in enumerate(messages, 1):
+        size = len(m.encode())
+        if size > MAX_MESSAGE_BYTES:
+            print(f"status: ERROR  message {i} is {size} bytes; agy truncates a single message at ~192 KB "
+                  f"(limit here {MAX_MESSAGE_BYTES}). Split the materials across session turns, "
+                  "or shrink them; the question would otherwise be cut off.")
+            return 1
     stdin_data = "".join(
-        json.dumps({"event": "user", "message": {"role": "user", "content": wrap(a, p) if i == 0 else p}},
-                   ensure_ascii=False) + "\n"
-        for i, p in enumerate(prompts))
+        json.dumps({"event": "user", "message": {"role": "user", "content": m}}, ensure_ascii=False) + "\n"
+        for m in messages)
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time() * 1000)

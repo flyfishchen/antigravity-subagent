@@ -25,9 +25,29 @@
 - 一个统计文件数的小任务带 `--json-schema` 时，agy 自行启动了子代理，总消耗 58k token。
 - 进程墙钟：简单单轮 4–28s；Gemini 多轮中偶发 >60s 的长尾。
 
+## 首 token 延迟（2026-10-20，扣除 agy 启动 5–7s 后的模型本身）
+
+| 模型 / 思考等级 | 次数 | 首 token |
+|---|---|---|
+| gemini-4-argon / medium，~7k 上下文 | 5 | 4.0–6.5s |
+| gemini-4-argon / low | 3 | 4.8–16.5s |
+| gemini-3.8-flash / medium | 3 | 3.6–4.7s（thinking 225–483） |
+| claude-sonnet-5-5 / medium | 3 | 1.5–1.8s |
+| argon / medium，61.5k 无缓存 | 2 | ~7s |
+| argon / medium，61.5k，缓存命中 96% | 2 | 7.0–9.6s（命中没有变快） |
+
+- Argon 报告的 thinking_tokens 始终为 0，可能没有计入。
+- 从进程启动算起的端到端首 token 时间：Argon 8.7–22s，Sonnet 7–7.7s。
+- 用户日常长会话里观察到 Argon 首 token 10–80s，受控测试未复现。
+- 推论：Argon 适合后台、可并行、对延迟不敏感的子代理任务，不适合做交互主模型。
+
 ## 博客要点（https://flyfishchen.github.io/blog/llm-prompt-cache-analysis/）
 
-- Gemini 隐式缓存 best-effort，空闲 TTL 约 30–60s；空闲后掉到只剩系统提示+工具定义的 ~5.4k 共享前缀，重算导致 5–15s 首 token 延迟。
-- 作者推测原因：空闲 HTTP/2 连接关闭后请求落到没有缓存的实例。
-- Anthropic 显式缓存 5 分钟 TTL、命中价 10%；Gemini 命中折扣 75%；OpenAI 50%。
-- 建议：交互式迭代编码用 Claude；>200k 的大上下文载入用 Gemini。
+- Gemini 隐式缓存默认开启，但官方原话是 "no cost saving guarantee"，也没给保留时间。实测停顿几十秒到两分钟就可能掉到约 5.3k 的保底，重新预填充导致首 token 延迟 5–15s。
+- 约 5.3k 的保底在 Pi 和 agy 两个系统提示完全不同的 Agent 上都出现，更可能是平台侧因素（推测）。
+- 已核对的官方规格（2026-10）：
+  - 缓存读价格：Gemini 3.8 Flash 0.1x、4 Argon 0.05x；Claude Opus 5.5 / Sonnet 5.5 0.05x；OpenAI GPT-5.6 及以后 0.1x。
+  - Claude 默认 5 分钟、命中续期，可选 1 小时。
+  - OpenAI GPT-5.6 及以后命中后至少保留 30 分钟。
+  - Gemini 4 Argon 不支持显式缓存。
+- 建议：交互式迭代用缓存有明确规格的模型（Claude）；一次性读大量资料、不依赖缓存的任务用 Gemini。

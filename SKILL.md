@@ -129,6 +129,7 @@ gate 的拒绝分三类，报告里分组列出：
 - 想要"不同于 Claude 的视角"（交叉审查、第二意见）时优先 Gemini（`deep`）；`review` 是 agy 里的 Claude Opus，视角与你相近，适合当独立复核者而非"异构"意见。
 - 思考等级越高越慢、thinking token 越多（实测 argon high 一个读文件小任务即 ~200 thinking token）；机械任务不要上 high。
 - 失败或结果质量差时，先升等级（low→medium→high），再换模型。
+- Argon 首 token 慢且不稳：实测模型本身 4–16 秒，降到 low 也不快，缓存命中也不变快；加上进程启动，端到端常在 10 秒以上。用 Argon 的任务放到后台跑、并行跑，不要指望它快速来回。
 - 未指定任何模型选项时跟随 agy 设置（当前 Gemini 4 Argon Medium）；报告头部会打印实际使用的 `model` 和 `effort`。
 
 ## 运行

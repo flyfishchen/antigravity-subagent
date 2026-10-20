@@ -9,7 +9,8 @@
 - **派发任务**：单轮 `run`、同一进程多轮 `session`、`--resume` 续接会话、`--schema` 结构化输出。
 - **选模型和思考等级**：`--model` / `--effort`，或者用 `--profile` 预设（quick / standard / deep / iterate / review）。
 - **汇总报告**：本次 token 用量、缓存命中率、工具调用轨迹、被拦截的调用。
-- **权限策略** `--policy readonly | workspace | full`（默认 `workspace`），由 `scripts/agy_gate.py` 通过 agy 的 PreToolUse hook 强制执行。
+- **权限策略** `--policy none | readonly | workspace | full`（默认 `workspace`），由 `scripts/agy_gate.py` 通过 agy 的 PreToolUse hook 强制执行；`none` 禁用所有工具，用于材料已经给全的一次性任务。
+- **并行子代理**：`batch` 并行派发多个独立任务；`--shared` 把同一份材料放在每个任务最前面，适合用不同问题从多个维度探索。
 - **需确认的操作**：拒绝分三类——硬拒绝、待审批、交给主代理。待审批的操作经用户同意后，用 `--grant` 精确放行并续接会话；git commit/push 一律交回 Claude 执行。
 
 ## 前提

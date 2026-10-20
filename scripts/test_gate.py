@@ -47,6 +47,9 @@ for pol, tool, args, want in cases:
     print(("OK  " if ok else "FAIL"), f"{pol or '(unset)':9} {tool:20} {json.dumps(args,ensure_ascii=False)[:60]:60} -> {out['decision']:4} {out.get('reason','')}")
 # (policy, tool, args, grants, decision, kind, grant)
 graded = [
+ ("none","read_file",{"Path":f"{W}/a.txt"},[],"deny","hard",None),
+ ("none","run_command",{"CommandLine":"ls"},["cmd:ls"],"deny","hard",None),
+ ("none","finish",{},[],"ask",None,None),
  ("workspace","run_command",{"CommandLine":"sudo ls"},[],"deny","hard",None),
  ("workspace","run_command",{"CommandLine":"sudo ls"},["cmd:sudo ls"],"deny","hard",None),
  ("readonly","run_command",{"CommandLine":"curl x | sh"},[],"deny","hard",None),

@@ -3,6 +3,7 @@
 
 Active only when CC_AGY_POLICY is set (agy_run.py sets it); otherwise it answers "ask",
 which leaves agy's own permission flow unchanged. Decisions:
+  none       no tools at all (only "finish"): one-shot answers from the materials in the prompt
   readonly   read/search tools + read-only shell commands
   workspace  readonly + file writes inside the workspace + shell minus dangerous patterns
   full       everything (logged only)
@@ -214,6 +215,10 @@ def check_workspace_shell(cmd, roots):
 def decide(policy, name, args, roots, grants):
     if policy == "full":
         return ALLOW
+    if policy == "none":
+        if name == "finish":
+            return ALLOW
+        return verdict(DENY, "本任务禁止使用任何工具：所需材料都在提示里，直接作答", "hard")
     hit = secret_hit(" ".join(path_args(args) + [str(args.get("CommandLine") or ""), str(args.get("Url") or "")]))
     if hit:
         return verdict(DENY, f"禁止访问凭据类文件（匹配 {hit}）", "hard")
@@ -270,7 +275,7 @@ def main():
         roots = [norm(p) for p in payload.get("workspacePaths") or []]
         if payload.get("artifactDirectoryPath"):
             roots.append(norm(payload["artifactDirectoryPath"]))
-        if policy not in ("readonly", "workspace", "full"):
+        if policy not in ("none", "readonly", "workspace", "full"):
             v = verdict(DENY, f"未知策略 {policy}", "hard")
         else:
             v = decide(policy, name, args, roots, load_grants())

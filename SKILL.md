@@ -30,7 +30,7 @@ agy（Antigravity CLI，本机 `~/.local/bin/agy`，v1.4.x）本身是完整的�
 Gemini 隐式缓存是 best-effort，空闲 TTL 约 30–60s，空闲后首个请求会重新预填充（首 token 延迟 5–15s）。因此：
 
 1. **同一任务的多轮追问放进一个进程**（`session` 子命令 / stream-json 输入），不要分成多次间隔很久的 `--conversation` 续接。
-2. **Gemini 适合"一次喂大上下文、一次出结论"**（1M 上下文、>200k 的阅读型任务）；需要反复迭代、多轮小改的任务优先用 agy 里的 Claude 模型，或干脆自己做。
+2. **Gemini 适合大输入、大输出、一次完成的任务，以及同时拉起大量子代理。** 少用或不用多轮工具调用：agy 里每一步工具调用都是一次独立请求，Argon 每次首 token 要 4–16 秒，工具链越长等得越久。需要反复迭代、多轮小改的任务交给 agy 里的 Claude 模型，或者干脆自己做。
 3. 不必为 Gemini 做缓存预热；token 账以封装脚本输出的 `hit=` 为准。
 
 ## 怎么调用
@@ -58,6 +58,15 @@ $S run "追问" --cwd /abs/project --resume <conversation_id>
 # 多轮常驻（缓存友好）：文件里每轮用单独一行 --- 分隔
 $S session /path/prompts.txt --cwd /abs/project
 
+# 大输入：提示词写进文件，用 @ 传入（走 stdin，不受命令行单参数 128KB 的限制）
+$S run @/path/prompt_with_materials.txt --cwd /abs/project --policy readonly --profile deep
+
+# 并行拉起多个子代理：文件里每个独立任务用单独一行 --- 分隔，每个任务一个 agy 进程
+$S batch /path/tasks.txt --cwd /abs/project --policy readonly --profile standard --parallel 8
+
+# 多维度探索：同一份材料放在每个任务最前面（--shared），每个任务只写不同维度的问题；材料给全了就用 none 禁用工具
+$S batch /path/dimensions.txt --shared @/path/materials.txt --cwd /abs/project --policy none --profile standard --parallel 6
+
 # 结构化结果
 $S run "统计…" --cwd /abs/project --schema '{"type":"object","properties":{...},"required":[...]}'
 ```
@@ -68,9 +77,12 @@ agy 自身在本机等于无限制（always-proceed、无沙箱），而且它�
 
 | 策略 | 允许 | 拒绝 |
 |---|---|---|
+| `none` | 不能用任何工具（只放行 `finish`），只能根据提示里的材料一次作答 | 所有工具 |
 | `readonly` | 读/搜索工具、网页读取；shell 只限只读命令（ls/cat/rg/find/git status·log·diff 等，无重定向写入、无 `$()`） | 一切写文件、其余 shell |
 | `workspace`（**默认**） | 读工具；写文件仅限工作目录（及 agy 自己的 artifact 目录）；一般 shell（构建、测试、脚本） | 写工作区外、git commit/push/reset --hard 等、sudo、`curl … \| sh`、上传数据、ssh/scp/rsync、kill/pkill、systemctl/crontab、apt、全局安装、eval/exec |
 | `full` | 全部（仍记录日志） | — |
+
+`none` 用于材料已经全部放进提示的一次性任务。**只在提示里写"不要使用工具"不管用**：实测 Argon 在 12 个这样的任务里有 10 个仍去 read_file、跑 shell，每个任务调用模型 3–8 次，单个任务要 100 多秒；改用 `none` 后每个任务只调用一次模型，26–34 秒完成。
 
 所有策略（`full` 除外）都拒绝访问凭据文件（`~/.ssh`、`.env`、agy 的 oauth token 等），也拒绝 `schedule`、MCP、浏览器、再开子代理、发消息、删除知识库，以及未知的新工具。
 
@@ -134,7 +146,10 @@ gate 的拒绝分三类，报告里分组列出：
 
 ## 运行
 
-- 耗时较长（>1 分钟）的任务用 Bash 的 `run_in_background: true` 运行，完成后会通知你；多个独立子任务可以同时后台跑多个进程并行。
+- 耗时较长（>1 分钟）的任务用 Bash 的 `run_in_background: true` 运行，完成后会通知你。
+- 多个互不相关的子任务用 `batch` 一次并行派发：实测 8 路并发 Argon 全部成功、没有限流，总耗时 31.7 秒，各任务耗时加起来是 174.9 秒；单个任务会变慢一些（14–32 秒）。订阅额度和限流的上限没有测过，量大时从 `--parallel 4–8` 开始。
+- 同时启动多个进程时，agy 偶尔在加载模型配置阶段就报错（如 "--effort is not supported"）。`batch` 对这种在会话创建前就失败的任务会自动重试，最多 2 次。
+- `--shared` 让各任务的前缀逐字节一致，但实测 Gemini 并没有跨任务命中缓存（17 个任务的首次调用命中都是 0，`--warm` 预热也没用）。多维度并发的收益在并行，不在缓存。
 - 输出中的 `tools(...)` 是 agy 实际做了什么的轨迹，`log:` 是完整 NDJSON，必要时 `jq`/python 查看。
 
 ## 写给 agy 的提示
@@ -142,6 +157,7 @@ gate 的拒绝分三类，报告里分组列出：
 agy 看不到你的对话上下文，每次都是冷启动：
 
 - 写清目标、相关文件的**绝对路径**、约束（不准改哪些文件、不准 git commit/push）、完成标准、期望的输出格式。
+- **给 Gemini 的任务要一次给全、一次产出**：把需要的材料直接放进提示词（大材料用 `@文件`），或者一次列全所有要读的路径；要求一次输出完整结果。不要派"自己去仓库里一步步找"这种需要多轮工具探索的活，并用 `--policy none` 硬性禁用工具。
 - 只读调研用 `--policy readonly`（硬限制）；`--mode plan` 只是让 agy 先出计划，不是权限限制。
 - 需要机器可读结果时用 `--schema`，不要让它"输出 JSON"然后自己解析散文。
 

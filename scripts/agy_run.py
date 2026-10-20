@@ -2,11 +2,16 @@
 """Run Google Antigravity CLI (agy) headlessly as a subagent and print a compact report.
 
 Usage:
-  agy_run.py run "<prompt>" [--policy readonly|workspace|full] [--grant G ...] [--cwd DIR] [--profile P | --model M] [--effort E]
+  agy_run.py run "<prompt>" | @FILE | - [--policy none|readonly|workspace|full] [--grant G ...] [--cwd DIR] [--profile P | --model M] [--effort E]
                             [--mode plan|accept-edits|auto]
                             [--resume CONV_ID | --continue] [--schema JSON_OR_FILE]
                             [--add-dir DIR ...] [--sandbox] [--project ID] [--timeout SEC] [--raw-preamble]
   agy_run.py session PROMPTS_FILE [same options]   # one process, one turn per prompt (turns separated by a line "---")
+  agy_run.py batch TASKS_FILE [--parallel N] [--shared @FILE] [--warm] [same options]
+                                                    # independent tasks (separated by a line "---"), one agy
+                                                    # process each, N at a time; --shared puts the same
+                                                    # materials first in every task so the prefix is identical,
+                                                    # --warm runs task 1 alone before fanning out the rest
   agy_run.py models                                 # available models, aliases and profiles
   agy_run.py install-hook | uninstall-hook          # manage the PreToolUse gate in ~/.gemini/config/hooks.json
 
@@ -27,6 +32,8 @@ import json
 import os
 import shlex
 import subprocess
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import time
 from pathlib import Path
@@ -62,6 +69,7 @@ HOOK_COMMAND = (f'if [ -n "$CC_AGY_POLICY" ]; then exec python3 -I {GATE}; fi; '
                 'cat >/dev/null; printf \'%s\\n\' \'{"decision":"ask"}\'')
 
 POLICY_NOTES = {
+    "none": "权限策略 none：本任务禁止使用任何工具（包括读文件和 shell），所需材料都已在提示中，直接一次作答。",
     "readonly": "权限策略 readonly：只读。不得创建/修改/删除任何文件，shell 只能用只读命令。",
     "workspace": "权限策略 workspace：只能修改工作目录内的文件；禁止提权、远程连接、结束进程、系统管理命令、"
                  "定时任务、MCP、浏览器、再开子代理、访问凭据文件。git commit/push 由主代理执行，不要自己运行，"
@@ -177,16 +185,13 @@ def uninstall_hook():
 
 
 def run(a, prompts):
-    stream_input = a.command == "session"
-    cmd = build_cmd(a, stream_input)
-    if stream_input:
-        stdin_data = "".join(
-            json.dumps({"event": "user", "message": {"role": "user", "content": wrap(a, p) if i == 0 else p}},
-                       ensure_ascii=False) + "\n"
-            for i, p in enumerate(prompts))
-    else:
-        cmd.append("--print=" + wrap(a, prompts[0]))
-        stdin_data = ""
+    # prompts always go through stdin: a single argv string is capped at 128 KiB on Linux,
+    # which large-input Gemini tasks easily exceed
+    cmd = build_cmd(a, stream_input=True)
+    stdin_data = "".join(
+        json.dumps({"event": "user", "message": {"role": "user", "content": wrap(a, p) if i == 0 else p}},
+                   ensure_ascii=False) + "\n"
+        for i, p in enumerate(prompts))
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time() * 1000)
@@ -306,10 +311,63 @@ def run(a, prompts):
     return 0 if status == "SUCCESS" else 1
 
 
+def forward_args(a):
+    """Rebuild the per-task options for child `run` invocations of a batch."""
+    out = ["--policy", a.policy, "--cwd", a.cwd, "--project", a.project, "--timeout", str(a.timeout)]
+    for flag in ("model", "effort", "profile", "mode", "schema"):
+        if getattr(a, flag):
+            out += [f"--{flag}", getattr(a, flag)]
+    for g in a.grant or []:
+        out += ["--grant", g]
+    for d in a.add_dir or []:
+        out += ["--add-dir", d]
+    out += ["--sandbox"] * a.sandbox + ["--raw-preamble"] * a.raw_preamble
+    return out
+
+
+def batch(a, tasks, shared=""):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    common = forward_args(a)
+
+    def one(task):
+        with tempfile.NamedTemporaryFile("w", dir=LOG_DIR, prefix="task-", suffix=".txt", delete=False) as f:
+            # shared materials first, task last: identical bytes up to the question keep the prefix cacheable
+            f.write(f"{shared}\n\n---\n\n{task}" if shared else task)
+        try:
+            t = time.time()
+            for attempt in range(3):
+                p = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), "run", "@" + f.name, *common],
+                                   capture_output=True, text=True)
+                # agy occasionally fails to load model config when many processes start at once
+                # ("--effort is not supported ..."); such runs die before a conversation exists, so retry
+                if "conversation_id: None" not in p.stdout:
+                    break
+                time.sleep(3 + 3 * attempt)
+            return p.returncode, round(time.time() - t, 1), p.stdout + (p.stderr if p.returncode else "")
+        finally:
+            os.unlink(f.name)
+
+    t0 = time.time()
+    results = [one(tasks[0])] if a.warm else []
+    with ThreadPoolExecutor(max_workers=a.parallel) as pool:
+        results += list(pool.map(one, tasks[len(results):]))
+    print(f"batch: {len(tasks)} tasks, parallel {a.parallel}, wall {time.time() - t0:.1f}s, "
+          f"sum of task walls {sum(r[1] for r in results):.1f}s")
+    for i, (rc, wall, out) in enumerate(results, 1):
+        status = next((l for l in out.splitlines() if l.startswith("status:")), "status: ?").split("  ")[0]
+        usage = next((l for l in out.splitlines() if l.startswith("usage(this run):")), "")
+        hit = usage.split("hit=")[1].split(")")[0] if "hit=" in usage else "?"
+        print(f"  #{i} rc={rc} {wall}s {status} cache-hit {hit}  -- {tasks[i - 1].splitlines()[0][:50]}")
+    for i, (rc, wall, out) in enumerate(results, 1):
+        print(f"\n===== task {i}/{len(tasks)} =====")
+        print(out.rstrip())
+    return 0 if all(r[0] == 0 for r in results) else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("command", choices=["run", "session", "models", "install-hook", "uninstall-hook"])
-    ap.add_argument("prompt", nargs="?", help="prompt text (run) or prompts file, turns separated by a line '---' (session); '-' = stdin")
+    ap.add_argument("command", choices=["run", "session", "batch", "models", "install-hook", "uninstall-hook"])
+    ap.add_argument("prompt", nargs="?", help="prompt text, @file or '-' for stdin (run); prompts file with turns separated by a line '---' (session)")
     ap.add_argument("--policy", choices=list(POLICY_NOTES), default="workspace",
                     help="tool permission policy enforced by the PreToolUse gate (default workspace)")
     ap.add_argument("--grant", action="append", metavar="G",
@@ -328,6 +386,9 @@ def main():
     ap.add_argument("--project", default="outside-of-project")
     ap.add_argument("--timeout", type=int, default=900, help="seconds; 0 = no limit")
     ap.add_argument("--raw-preamble", action="store_true", help="do not prepend the workspace preamble")
+    ap.add_argument("--parallel", type=int, default=4, help="batch: concurrent agy processes (default 4)")
+    ap.add_argument("--shared", metavar="@FILE", help="batch: materials placed before every task (same prefix)")
+    ap.add_argument("--warm", action="store_true", help="batch: run task 1 alone first to warm the shared prefix")
     a = ap.parse_args()
     if a.command == "models":
         sys.exit(list_models())
@@ -344,15 +405,24 @@ def main():
         if g.partition(":")[0] not in ("cmd", "write", "tool") or not g.partition(":")[2].strip():
             ap.error(f"invalid --grant {g!r}; use cmd:<command>, write:<path> or tool:<name>")
 
-    text = sys.stdin.read() if a.prompt == "-" else (
-        Path(a.prompt).read_text() if a.command == "session" else a.prompt)
-    if a.command == "session":
+    if a.prompt == "-":
+        text = sys.stdin.read()
+    elif a.command in ("session", "batch") or a.prompt.startswith("@"):
+        text = Path(a.prompt.removeprefix("@")).read_text()
+    else:
+        text = a.prompt
+    if a.command in ("session", "batch"):
         prompts = [p.strip() for p in text.split("\n---\n")]
     else:
         prompts = [text.strip()]
     prompts = [p for p in prompts if p]
     if not prompts:
         sys.exit("empty prompt")
+    if a.command == "batch":
+        if a.resume or a.cont:
+            ap.error("batch tasks are independent; --resume/--continue are not supported")
+        shared = Path(a.shared.removeprefix("@")).read_text().strip() if a.shared else ""
+        sys.exit(batch(a, prompts, shared))
     sys.exit(run(a, prompts))
 
 

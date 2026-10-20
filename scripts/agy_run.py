@@ -271,15 +271,13 @@ def run(a, prompts):
             gate_log = gate_log.rename(final_log.with_suffix(".gate.jsonl"))
 
     prompt_total = usage["input"] + usage["cache_read"]
-    hit = (usage["cache_read"] / prompt_total * 100) if prompt_total else 0.0
     status = results[-1].get("status") if results else "NO_RESULT"
 
     print(f"conversation_id: {conv_id}")
     req_model, req_effort = resolve_model(a.model, a.effort, a.profile)
     print(f"model: {model or req_model or '(agy 默认)'}  effort: {req_effort or '(模型默认)'}")
     print(f"status: {status}  exit: {rc}  wall: {time.time() - t0:.1f}s  turns: {len(results)}")
-    print(f"usage(this run): prompt={prompt_total} (uncached={usage['input']}, cache_read={usage['cache_read']}, "
-          f"hit={hit:.0f}%) output={usage['output']} thinking={usage['thinking']}")
+    print(f"usage(this run): prompt={prompt_total} output={usage['output']} thinking={usage['thinking']}")
     print(f"tools({len(tools)}): " + ("; ".join(tools) if tools else "-"))
     print(f"policy: {a.policy}  grants: {len(a.grant or [])}  gate checks: {len(gate)}  denied: {len(denied)}")
     groups = {"hard": [], "approval": [], "handoff": []}
@@ -342,7 +340,7 @@ def batch(a, tasks, shared=""):
 
     def one(task):
         with tempfile.NamedTemporaryFile("w", dir=LOG_DIR, prefix="task-", suffix=".txt", delete=False) as f:
-            # shared materials first, task last: identical bytes up to the question keep the prefix cacheable
+            # shared materials first, task last
             f.write(f"{shared}\n\n---\n\n{task}" if shared else task)
         try:
             t = time.time()
@@ -366,9 +364,7 @@ def batch(a, tasks, shared=""):
           f"sum of task walls {sum(r[1] for r in results):.1f}s")
     for i, (rc, wall, out) in enumerate(results, 1):
         status = next((l for l in out.splitlines() if l.startswith("status:")), "status: ?").split("  ")[0]
-        usage = next((l for l in out.splitlines() if l.startswith("usage(this run):")), "")
-        hit = usage.split("hit=")[1].split(")")[0] if "hit=" in usage else "?"
-        print(f"  #{i} rc={rc} {wall}s {status} cache-hit {hit}  -- {tasks[i - 1].splitlines()[0][:50]}")
+        print(f"  #{i} rc={rc} {wall}s {status}  -- {tasks[i - 1].splitlines()[0][:50]}")
     for i, (rc, wall, out) in enumerate(results, 1):
         print(f"\n===== task {i}/{len(tasks)} =====")
         print(out.rstrip())

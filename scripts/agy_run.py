@@ -7,11 +7,10 @@ Usage:
                             [--resume CONV_ID | --continue] [--schema JSON_OR_FILE]
                             [--add-dir DIR ...] [--sandbox] [--project ID] [--timeout SEC] [--raw-preamble]
   agy_run.py session PROMPTS_FILE [same options]   # one process, one turn per prompt (turns separated by a line "---")
-  agy_run.py batch TASKS_FILE [--parallel N] [--shared @FILE] [--warm] [same options]
+  agy_run.py batch TASKS_FILE [--parallel N] [--shared @FILE] [same options]
                                                     # independent tasks (separated by a line "---"), one agy
                                                     # process each, N at a time; --shared puts the same
-                                                    # materials first in every task so the prefix is identical,
-                                                    # --warm runs task 1 alone before fanning out the rest
+                                                    # materials first in every task
   agy_run.py models                                 # available models, aliases and profiles
   agy_run.py install-hook | uninstall-hook          # manage the PreToolUse gate in ~/.gemini/config/hooks.json
 
@@ -357,9 +356,8 @@ def batch(a, tasks, shared=""):
             os.unlink(f.name)
 
     t0 = time.time()
-    results = [one(tasks[0])] if a.warm else []
     with ThreadPoolExecutor(max_workers=a.parallel) as pool:
-        results += list(pool.map(one, tasks[len(results):]))
+        results = list(pool.map(one, tasks))
     print(f"batch: {len(tasks)} tasks, parallel {a.parallel}, wall {time.time() - t0:.1f}s, "
           f"sum of task walls {sum(r[1] for r in results):.1f}s")
     for i, (rc, wall, out) in enumerate(results, 1):
@@ -395,7 +393,6 @@ def main():
     ap.add_argument("--raw-preamble", action="store_true", help="do not prepend the workspace preamble")
     ap.add_argument("--parallel", type=int, default=4, help="batch: concurrent agy processes (default 4)")
     ap.add_argument("--shared", metavar="@FILE", help="batch: materials placed before every task (same prefix)")
-    ap.add_argument("--warm", action="store_true", help="batch: run task 1 alone first to warm the shared prefix")
     a = ap.parse_args()
     if a.command == "models":
         sys.exit(list_models())

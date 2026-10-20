@@ -8,7 +8,7 @@
 
 - **派发任务**：单轮 `run`、同一进程多轮 `session`、`--resume` 续接会话、`--schema` 结构化输出。
 - **选模型和思考等级**：`--model` / `--effort`，或者用 `--profile` 预设（quick / standard / deep / iterate / review）。
-- **汇总报告**：本次 token 用量、缓存命中率、工具调用轨迹、被拦截的调用。
+- **汇总报告**：本次 token 用量、工具调用轨迹、被拦截的调用。
 - **权限策略** `--policy none | readonly | workspace | full`（默认 `workspace`），由 `scripts/agy_gate.py` 通过 agy 的 PreToolUse hook 强制执行；`none` 禁用所有工具，用于材料已经给全的一次性任务。
 - **并行子代理**：`batch` 并行派发多个独立任务；`--shared` 把同一份材料放在每个任务最前面，适合用不同问题从多个维度探索。
 - **需确认的操作**：拒绝分三类——硬拒绝、待审批、交给主代理。待审批的操作经用户同意后，用 `--grant` 精确放行并续接会话；git commit/push 一律交回 Claude 执行。
@@ -44,11 +44,7 @@ $S models
 ## 实测要点（agy 1.4.2，Ubuntu）
 
 - **工作目录**：不带 `--project` 时，shell 工具的工作目录会被钉在 `default-cli-project` 登记的文件夹，所以脚本默认加 `--project outside-of-project`。
-- **缓存**：
-  - Claude 模型经 agy 调用时，同一会话内缓存命中率 95% 以上；新开会话只命中 agy 系统提示的固定部分（约 5.4k），子代理之间不共享缓存。
-  - agy 会把单条用户消息截在约 19 万字节，不报错；封装脚本超过 18 万字节就直接拒绝。
-  - Gemini 3.8 Flash 在约 8k 的小上下文下命中为 0。
-  - Gemini 4 Argon 稳定命中约 5.3k 的固定前缀。
+- **消息长度**：agy 会把单条用户消息截在约 19 万字节，不报错；封装脚本超过 18 万字节就直接拒绝。
 - **沙箱**：Ubuntu 默认的 AppArmor 策略会让 agy 的终端沙箱不可用。此时 `--sandbox` 静默无效，`--mode auto` 退回默认模式，所以权限只能靠 hook 控制。
 - **hook**：
   - `~/.gemini/antigravity-cli/hooks.json` 会被加载，但里面的 hook 不执行；`~/.gemini/config/hooks.json` 和 `<workspace>/.agents/hooks.json` 会执行。

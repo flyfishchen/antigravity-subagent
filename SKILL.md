@@ -17,25 +17,14 @@ agy（Antigravity CLI，本机 `~/.local/bin/agy`，v1.4.x）本身是完整的�
 - **工作目录坑**：不带 `--project` 时 agy 使用 `default-cli-project`，其 shell 工具的 cwd 被钉在该项目登记的文件夹；若该文件夹已不存在（作者环境即如此），`run_command` 全部失败，agy 还会悄悄改用 read_file 绕过，看起来像成功。必须用 `--project outside-of-project`，shell 才会用进程 cwd。封装脚本已默认处理。
 - **自身开销**：每次请求固定前缀约 7.4k（Gemini）/ 11.5k（Claude）token（系统提示+工具定义）；进程启动+鉴权约 3–10s。简单任务 agy 也可能自己再开子代理，token 翻几倍。
 
-## 提示缓存特性（决定怎么调用）
-
-参考 https://flyfishchen.github.io/blog/llm-prompt-cache-analysis/ 并经本机实测（细节见 `references/findings.md`）：
-
-| 模型（经 agy） | 缓存表现 | 含义 |
-|---|---|---|
-| `claude-*-5-5-*` | 同一会话内命中 85–97%（5 分钟 TTL，结果确定）；新开会话只命中 agy 系统提示固定部分约 5.4k | 多轮放在同一会话里很划算 |
-| `gemini-4-argon-*` | 稳定命中约 5.3k 静态前缀；续接时偶尔命中更多（实测 54–72%），不稳定 | 时好时坏，别指望 |
-| `gemini-3.8-flash-*` | 小上下文（~8k）下 0 命中 | 每轮全价重算 |
-
-Gemini 隐式缓存是 best-effort，空闲 TTL 约 30–60s，空闲后首个请求会重新预填充（首 token 延迟 5–15s）。因此：
+## 调用原则
 
 1. **同一任务的多轮追问放进一个进程**（`session` 子命令 / stream-json 输入），不要分成多次间隔很久的 `--conversation` 续接。
 2. **Gemini 适合大输入、大输出、一次完成的任务，以及同时拉起大量子代理。** 少用或不用多轮工具调用：agy 里每一步工具调用都是一次独立请求，Argon 每次首 token 要 4–16 秒，工具链越长等得越久。需要反复迭代、多轮小改的任务交给 agy 里的 Claude 模型，或者干脆自己做。
-3. 不必为 Gemini 做缓存预热；token 账以封装脚本输出的 `hit=` 为准。
 
 ## 怎么调用
 
-统一用封装脚本（它会：加 `--project outside-of-project`、启用权限策略、在提示前加"工作目录/策略/无头/列出改动文件"前言、保存原始事件日志、汇总本次 token 与缓存命中率、列出工具调用轨迹和被拦截的调用）。**不要绕过脚本直接调 `agy -p`**，那样没有权限限制。
+统一用封装脚本（它会：加 `--project outside-of-project`、启用权限策略、在提示前加"工作目录/策略/无头/列出改动文件"前言、保存原始事件日志、汇总本次 token 用量、列出工具调用轨迹和被拦截的调用）。**不要绕过脚本直接调 `agy -p`**，那样没有权限限制。
 
 ```bash
 S=~/.claude/skills/antigravity-subagent/scripts/agy_run.py
@@ -55,7 +44,7 @@ $S models
 # 续接上一次会话（拿上次输出里的 conversation_id）
 $S run "追问" --cwd /abs/project --resume <conversation_id>
 
-# 多轮常驻（缓存友好）：文件里每轮用单独一行 --- 分隔
+# 多轮常驻：文件里每轮用单独一行 --- 分隔
 $S session /path/prompts.txt --cwd /abs/project
 
 # 大输入：提示词写进文件，用 @ 传入（走 stdin，绕开命令行单参数 128KB 的限制；但 agy 单条消息上限约 19 万字节，脚本超过 18 万就拒绝）
@@ -119,7 +108,7 @@ gate 的拒绝分三类，报告里分组列出：
 4. **批准后二选一**：
    - 操作嵌在 agy 的任务中间，后续步骤还依赖它：用报告里的 `resume:` 命令续接，只保留用户批准的 `--grant`。
    - 操作是独立的收尾动作：由你自己执行，更直观。
-5. 续接后 agy 如果换了命令写法，会再次被拒，重复上面的流程即可。续接时 Gemini 缓存基本已过期，这是预期开销。
+5. 续接后 agy 如果换了命令写法，会再次被拒，重复上面的流程即可。
 6. **交给主代理的项**：你先 `git diff` 审改动，按用户的要求决定是否提交。agy 只提供建议的提交信息。
 
 ## 模型与思考等级
@@ -133,7 +122,7 @@ gate 的拒绝分三类，报告里分组列出：
 | `quick` | gemini-3.8-flash / low | 机械性小活：查找、批量改名、格式转换、简单脚本 |
 | `standard` | gemini-4-argon / medium | 一般编码/调研（= agy 默认设置） |
 | `deep` | gemini-4-argon / high | 复杂推理、跨文件分析、超大上下文（>200k） |
-| `iterate` | claude-sonnet-5-5 / medium | 多轮迭代修改；缓存命中高，续接便宜 |
+| `iterate` | claude-sonnet-5-5 / medium | 多轮迭代修改 |
 | `review` | claude-opus-5-5 / high | 第二意见、代码审查、方案把关 |
 
 选择原则：
@@ -141,7 +130,7 @@ gate 的拒绝分三类，报告里分组列出：
 - 想要"不同于 Claude 的视角"（交叉审查、第二意见）时优先 Gemini（`deep`）；`review` 是 agy 里的 Claude Opus，视角与你相近，适合当独立复核者而非"异构"意见。
 - 思考等级越高越慢、thinking token 越多（实测 argon high 一个读文件小任务即 ~200 thinking token）；机械任务不要上 high。
 - 失败或结果质量差时，先升等级（low→medium→high），再换模型。
-- Argon 首 token 慢且不稳：实测模型本身 4–16 秒，降到 low 也不快，缓存命中也不变快；加上进程启动，端到端常在 10 秒以上。用 Argon 的任务放到后台跑、并行跑，不要指望它快速来回。
+- Argon 首 token 慢且不稳：实测模型本身 4–16 秒，降到 low 也不快；加上进程启动，端到端常在 10 秒以上。用 Argon 的任务放到后台跑、并行跑，不要指望它快速来回。
 - 未指定任何模型选项时跟随 agy 设置（当前 Gemini 4 Argon Medium）；报告头部会打印实际使用的 `model` 和 `effort`。
 
 ## 运行
@@ -149,7 +138,7 @@ gate 的拒绝分三类，报告里分组列出：
 - 耗时较长（>1 分钟）的任务用 Bash 的 `run_in_background: true` 运行，完成后会通知你。
 - 多个互不相关的子任务用 `batch` 一次并行派发：实测 8 路并发 Argon 全部成功、没有限流，总耗时 31.7 秒，各任务耗时加起来是 174.9 秒；单个任务会变慢一些（14–32 秒）。订阅额度和限流的上限没有测过，量大时从 `--parallel 4–8` 开始。
 - 同时启动多个进程时，agy 偶尔在加载模型配置阶段就报错（如 "--effort is not supported"）。`batch` 对这种在会话创建前就失败的任务会自动重试，最多 2 次。
-- `--shared` 让各任务的前缀逐字节一致，但 agy 的子代理之间不共享缓存：Gemini 各任务首次调用命中都是 0；Claude 先预热、前缀完全相同，新会话也只命中 agy 系统提示的固定部分（5,446）。要共享缓存，只能绕过 agy 直接调 API，先建显式缓存再并发。多维度并发的收益在并行，不在缓存。
+- `--shared` 让各任务共用同一份材料，只换后面的问题。
 - **agy 会把单条用户消息截在约 19 万字节**，超出部分换成 `<truncated N bytes>`，不报错。问题放在材料后面时会一起丢掉。脚本对超过 18 万字节的消息直接报错；材料太多就精简，或用 `session` 分多轮发送。
 - 输出中的 `tools(...)` 是 agy 实际做了什么的轨迹，`log:` 是完整 NDJSON，必要时 `jq`/python 查看。
 
